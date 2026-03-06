@@ -35,6 +35,15 @@ local function stripPlatform(stationName)
     return cleaned
 end
 
+local function stripPlatformNoWav(stationName)
+    if not stationName then return nil end
+
+    local cleaned = stationName:match("^(.*)%s") or stationName
+    cleaned = string.lower(cleaned)
+    cleaned = string.gsub(cleaned, "%s+", "")
+
+    return cleaned
+end
 
 function getOperatorIDs()
     print("reading TFW operator ID")
@@ -73,6 +82,16 @@ function findLastScheduleSection(schedule)
     end
 end
 
+function getScheduleEntry(entry)
+    local instr = entry.instruction
+    if instr.id == "create:destination" then
+        return stripPlatformNoWav(instr.data.text)
+    elseif instr.id == "createrailwaysnavigator:prioritized_destination_instruction" then
+        return stripPlatformNoWav(instr.data.filters and instr.data.filters[1])
+    end
+    return nil
+end
+
 function findDestination(schedule, currentStationName)
     local entries = schedule.entries
     local count = #entries
@@ -96,10 +115,10 @@ function findDestination(schedule, currentStationName)
         if s < #sections then endIndex = sections[s + 1] - 1 end
 
         for i = startIndex, endIndex do
-            if entries[i].instruction.id == "create:destination" then
-                if entries[i].instruction.data.text == currentStationName then
-                    currentSectionIndex = s
-                end
+            local name = getScheduleEntry(entries[i])
+            if name == currentStationName then
+                currentSectionIndex = s
+                break
             end
         end
     end
@@ -127,12 +146,12 @@ function findDestination(schedule, currentStationName)
         local lastIndex = nil
 
         for i = startIndex, endIndex do
-            if entries[i].instruction.id == "create:destination" then
+            if getScheduleEntry(entries[i]) then
                 lastDest = entries[i]
                 lastIndex = i
             end
         end
-
+        print("last dest for section " .. sectionIndex .. " is: " .. tostring(getScheduleEntry(lastDest)))
         return lastDest, lastIndex
     end
 
@@ -140,7 +159,7 @@ function findDestination(schedule, currentStationName)
         getLastDestinationOfSection(currentSectionIndex)
 
     -- 🔥 KEY FIX: compare station names directly
-    if currentLastDest and currentLastDest.instruction.data.text ==
+    if currentLastDest and getScheduleEntry(currentLastDest) ==
         currentStationName then
 
         local nextLastDest, nextLastIndex =
@@ -176,36 +195,46 @@ function getCallingPoints(schedule, currentStation)
     local entries = schedule.entries
     local locations = {}
 
-    local destEntry = findDestination(schedule, currentStation)
-    if not destEntry then
+    -- 1. Find the destination and its index in the schedule
+    local destEntry, destIndex = findDestination(schedule, currentStation)
+    if not destEntry or not destIndex then
+        print("Could not determine destination index.")
         return locations
     end
 
-    local destination = destEntry.instruction.data.text
+    -- 2. Find the start of the current section
+    -- We look backwards from the destination index to find the nearest 'travel_section'
+    local sectionStartIndex = 1
+    for i = destIndex, 1, -1 do
+        if entries[i].instruction.id == "createrailwaysnavigator:travel_section" then
+            sectionStartIndex = i
+            break
+        end
+    end
+
+    local destinationName = getScheduleEntry(destEntry)
     local started = false
 
-    for i = 1, #entries do
-        local instr = entries[i]
-
-        if instr.instruction.id == "create:destination" then
-            local name = instr.instruction.data.text
-
+    -- 3. Only iterate within the current section
+    for i = sectionStartIndex, destIndex do
+        local name = getScheduleEntry(entries[i])
+        
+        if name then
             if name == currentStation then
-                print("initialising calling point fetch..")
+                -- We found where we are; start collecting from the NEXT entry
                 started = true
-
             elseif started then
                 table.insert(locations, name)
-
-                if name == destination then
-                    print("finished fetching calling points.")
+                
+                -- Stop if we hit the destination name
+                if name == destinationName then
                     break
                 end
             end
         end
     end
 
-    print("returning (" .. #locations .. " calling points)")
+    print("Returning " .. #locations .. " calling points for this section.")
     return locations
 end
 
@@ -303,15 +332,11 @@ function processStation(st)
 
                 local platform = getPlatform(station.getStationName())
 
-                local destName
+                local destName = "Unknown"
+
                 if type(destination) == "table" then
-                    if destination.instruction and destination.instruction.data and
-                        destination.instruction.data.text then
-                        destName = destination.instruction.data.text
-                    else
-                        destName = "Unknown"
-                    end
-                else
+                    destName = getScheduleEntry(destination) or "Unknown"
+                elseif type(destination) == "string" then
                     destName = destination
                 end
 
@@ -326,7 +351,7 @@ function processStation(st)
                 --     table.unpack(announceCallingPoints(schedule, station.getStationName())) -- calling points
                 -- })
                 
-                local cpAudio = announceCallingPoints(schedule, station.getStationName())
+                local cpAudio = announceCallingPoints(schedule, stripPlatformNoWav(station.getStationName()))
                 
                 local clips = {
                     "disk/sm/misc/jingle.wav",
