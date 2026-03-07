@@ -92,84 +92,39 @@ function getScheduleEntry(entry)
     return nil
 end
 
-function findDestination(schedule, currentStationName)
+function findDestination(schedule)
     local entries = schedule.entries
-    local count = #entries
-    local isCyclic = schedule.cyclic
+    local curIndex = (schedule.progress or 0) + 1 -- we want to start looking from the next instruction, since the current one does not need to be announced
+    local lastIndex = #entries
+    local destIndex = lastIndex -- default to end of schedule if no more sections are found
+    local isLastSection = true
 
-    -- Build section list
-    local sections = {}
-    for i = 1, count do
-        if entries[i].instruction.id == "createrailwaysnavigator:travel_section" then
-            table.insert(sections, i)
+    print("looking for next section starting from index " .. curIndex .. " to " .. #entries)
+    for i = curIndex, #entries do
+        if entries[i].instruction.id == "createrailwaysnavigator:travel_section" then 
+            lastIndex = i --Find the next section, and set the lastIndex to it, so we only look within the current section
+            isLastSection = false
+            print("found next section at index " .. i)
+            break
         end
     end
 
-    -- Find which section contains the current station
-    local currentSectionIndex = 1
-
-    for s = 1, #sections do
-        local startIndex = sections[s]
-        local endIndex = count
-
-        if s < #sections then endIndex = sections[s + 1] - 1 end
-
-        for i = startIndex, endIndex do
-            local name = getScheduleEntry(entries[i])
-            if name == currentStationName then
-                currentSectionIndex = s
-                break
+    local lastIndex = lastIndex -- we want to start looking backwards from the instruction before the next section, since the next section is not relevant for us
+            while lastIndex > (schedule.progress-1 or -1) and -- we want to make sure the index represents destination instruction (-1 to allow current station to be included if it is the last stop)
+                entries[lastIndex].instruction.id ~= "create:destination" and
+                entries[lastIndex].instruction.id ~= "createrailwaysnavigator:prioritized_destination_instruction"
+            do
+                lastIndex = lastIndex - 1 -- It will keep going back until it finds a destination instruction, or it reaches the current station
             end
-        end
-    end
-
-    local nextSectionIndex = currentSectionIndex + 1
-    if nextSectionIndex > #sections then
-        if isCyclic then
-            nextSectionIndex = 1
-        else
-            nextSectionIndex = nil
-        end
-    end
-
-    local function getLastDestinationOfSection(sectionIndex)
-        if not sectionIndex then return nil end
-
-        local startIndex = sections[sectionIndex]
-        local endIndex = count
-
-        if sectionIndex < #sections then
-            endIndex = sections[sectionIndex + 1] - 1
-        end
-
-        local lastDest = nil
-        local lastIndex = nil
-
-        for i = startIndex, endIndex do
-            if getScheduleEntry(entries[i]) then
-                lastDest = entries[i]
-                lastIndex = i
+            if not isLastSection then
+                print("No sections found")
+                destIndex = lastIndex -- if we found a destination instruction, set the destIndex to it, otherwise it will remain as the end of the schedule.
             end
-        end
-        print("last dest for section " .. sectionIndex .. " is: " .. tostring(getScheduleEntry(lastDest)))
-        return lastDest, lastIndex
-    end
-
-    local currentLastDest, currentLastIndex =
-        getLastDestinationOfSection(currentSectionIndex)
-
-    -- 🔥 KEY FIX: compare station names directly
-    if currentLastDest and getScheduleEntry(currentLastDest) ==
-        currentStationName then
-
-        local nextLastDest, nextLastIndex =
-            getLastDestinationOfSection(nextSectionIndex)
-
-        if nextLastDest then return nextLastDest, nextLastIndex end
-    end
-
-    return currentLastDest, currentLastIndex
+            print("found next section at index " .. lastIndex .. ", last destination instruction at index " .. destIndex)
+        
+    return destIndex
 end
+    
 
 -- =====================================
 -- STRIP PLATFORM
@@ -181,8 +136,7 @@ function getStations(schedule, station)
     local entries = schedule.entries
     local t = {}
     local section, start = findLastScheduleSection(schedule)
-    local destination, index = findDestination(schedule,
-                                               station.getStationName())
+    local index = findDestination(schedule)
     for i = start, index do
         if entries[i].instruction.id == "create:destination" then
             table.insert(t, entries[i].instruction.data.text)
@@ -196,8 +150,8 @@ function getCallingPoints(schedule, currentStation)
     local locations = {}
 
     -- 1. Find the destination and its index in the schedule
-    local destEntry, destIndex = findDestination(schedule, currentStation)
-    if not destEntry or not destIndex then
+    local destIndex = findDestination(schedule)
+    if not destIndex then
         print("Could not determine destination index.")
         return locations
     end
@@ -212,7 +166,7 @@ function getCallingPoints(schedule, currentStation)
         end
     end
 
-    local destinationName = getScheduleEntry(destEntry)
+    local destinationName = getScheduleEntry(entries[destIndex])
     local started = false
 
     -- 3. Only iterate within the current section
@@ -237,7 +191,7 @@ function getCallingPoints(schedule, currentStation)
     print("Returning " .. #locations .. " calling points for this section.")
     return locations
 end
-
+-- This needs to be rewriten to not use findLastScheduleSection. 
 function getTrainOperatorID(schedule)
     -- find the last Schedule Section
     -- schedule[schedule.progress + 1]
@@ -258,10 +212,10 @@ function getCarriageCount(trainName) return
     tonumber(trainName:match(".+ (%d+)")) end
 
 function getPlatform(stationName)
-local stationName = stationName:gsub("^%s+", ""):gsub("%s+$", "")
+    local stationName = stationName:gsub("^%s+", ""):gsub("%s+$", "")
 
-local platformCode = stationName:match("%sP([%w%-]+)$")
-return platformCode
+    local platformCode = stationName:match("%sP([%w%-]+)$")
+    return platformCode
 end
 
 function announceCallingPoints(schedule, currentStation)
@@ -554,4 +508,3 @@ function main()
 end
 
 main()
-
